@@ -1,124 +1,148 @@
-# Copyright (c) 2022 Robert Bosch GmbH and Microsoft Corporation
-#
-# This program and the accompanying materials are made available under the
-# terms of the Apache License, Version 2.0 which is available at
-# https://www.apache.org/licenses/LICENSE-2.0.
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-# License for the specific language governing permissions and limitations
-# under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
-"""A sample skeleton vehicle app."""
-
-import asyncio
+from awscrt import mqtt, http
+from awsiot import mqtt_connection_builder
+import sys
+import threading
+import time
 import json
-import logging
-import signal
+from command_line_utils import CommandLineUtils
+cmdData = CommandLineUtils.parse_sample_input_pubsub()
 
-from vehicle import Vehicle, vehicle  # type: ignore
-from velocitas_sdk.util.log import (  # type: ignore
-    get_opentelemetry_log_factory,
-    get_opentelemetry_log_format,
-)
-from velocitas_sdk.vdb.reply import DataPointReply
-from velocitas_sdk.vehicle_app import VehicleApp, subscribe_topic
-
-# Configure the VehicleApp logger with the necessary log config and level.
-logging.setLogRecordFactory(get_opentelemetry_log_factory())
-logging.basicConfig(format=get_opentelemetry_log_format())
-logging.getLogger().setLevel("DEBUG")
-logger = logging.getLogger(__name__)
-
-GET_SPEED_REQUEST_TOPIC = "sampleapp/getSpeed"
-GET_SPEED_RESPONSE_TOPIC = "sampleapp/getSpeed/response"
-DATABROKER_SUBSCRIPTION_TOPIC = "sampleapp/currentSpeed"
+received_count = 0
+received_all_event = threading.Event()
 
 
-class SampleApp(VehicleApp):
-    """
-    Sample skeleton vehicle app.
-
-    The skeleton subscribes to a getSpeed MQTT topic
-    to listen for incoming requests to get
-    the current vehicle speed and publishes it to
-    a response topic.
-
-    It also subcribes to the VehicleDataBroker
-    directly for updates of the
-    Vehicle.Speed signal and publishes this
-    information via another specific MQTT topic
-    """
-
-    def __init__(self, vehicle_client: Vehicle):
-        # SampleApp inherits from VehicleApp.
-        super().__init__()
-        self.Vehicle = vehicle_client
-
-    async def on_start(self):
-        """Run when the vehicle app starts"""
-        # This method will be called by the SDK when the connection to the
-        # Vehicle DataBroker is ready.
-        # Here you can subscribe for the Vehicle Signals update (e.g. Vehicle Speed).
-        await self.Vehicle.Speed.subscribe(self.on_speed_change)
-
-    async def on_speed_change(self, data: DataPointReply):
-        """The on_speed_change callback, this will be executed when receiving a new
-        vehicle signal updates."""
-        # Get the current vehicle speed value from the received DatapointReply.
-        # The DatapointReply containes the values of all subscribed DataPoints of
-        # the same callback.
-        vehicle_speed = data.get(self.Vehicle.Speed).value
-
-        # Do anything with the received value.
-        # Example:
-        # - Publishes current speed to MQTT Topic (i.e. DATABROKER_SUBSCRIPTION_TOPIC).
-        await self.publish_event(
-            DATABROKER_SUBSCRIPTION_TOPIC,
-            json.dumps({"speed": vehicle_speed}),
-        )
-
-    @subscribe_topic(GET_SPEED_REQUEST_TOPIC)
-    async def on_get_speed_request_received(self, data: str) -> None:
-        """The subscribe_topic annotation is used to subscribe for incoming
-        PubSub events, e.g. MQTT event for GET_SPEED_REQUEST_TOPIC.
-        """
-
-        # Use the logger with the preferred log level (e.g. debug, info, error, etc)
-        logger.debug(
-            "PubSub event for the Topic: %s -> is received with the data: %s",
-            GET_SPEED_REQUEST_TOPIC,
-            data,
-        )
-
-        # Getting current speed from VehicleDataBroker using the DataPoint getter.
-        vehicle_speed = (await self.Vehicle.Speed.get()).value
-
-        # Do anything with the speed value.
-        # Example:
-        # - Publishes the vehicle speed to MQTT topic (i.e. GET_SPEED_RESPONSE_TOPIC).
-        await self.publish_event(
-            GET_SPEED_RESPONSE_TOPIC,
-            json.dumps(
-                {
-                    "result": {
-                        "status": 0,
-                        "message": f"""Current Speed = {vehicle_speed}""",
-                    },
-                }
-            ),
-        )
+# Callback when connection is accidentally lost.
+def on_connection_interrupted(connection, error, **kwargs):
+    print("Connection interrupted. error: {}".format(error))
 
 
-async def main():
-    """Main function"""
-    logger.info("Starting SampleApp...")
+# Callback when an interrupted connection is re-established.
+def on_connection_resumed(connection, return_code, session_present, **kwargs):
+    print("Connection resumed. return_code: {} session_present: {}".format(return_code, session_present))
+
+    if return_code == mqtt.ConnectReturnCode.ACCEPTED and not session_present:
+        print("Session did not persist. Resubscribing to existing topics...")
+        resubscribe_future, _ = connection.resubscribe_existing_topics()
+
+        # Cannot synchronously wait for resubscribe result because we're on the connection's event-loop thread,
+        # evaluate result with a callback instead.
+        resubscribe_future.add_done_callback(on_resubscribe_complete)
 
 
-LOOP = asyncio.get_event_loop()
-LOOP.add_signal_handler(signal.SIGTERM, LOOP.stop)
-LOOP.run_until_complete(main())
-LOOP.close()
+def on_resubscribe_complete(resubscribe_future):
+    resubscribe_results = resubscribe_future.result()
+    print("Resubscribe results: {}".format(resubscribe_results))
+
+    for topic, qos in resubscribe_results['topics']:
+        if qos is None:
+            sys.exit("Server rejected resubscribe to topic: {}".format(topic))
+
+
+# Callback when the subscribed topic receives a message
+def on_message_received(topic, payload, dup, qos, retain, **kwargs):
+    print("Received message from topic '{}': {}".format(topic, payload))
+    global received_count
+    received_count += 1
+    if received_count == cmdData.input_count:
+        received_all_event.set()
+
+
+# Callback when the connection successfully connects
+def on_connection_success(connection, callback_data):
+    assert isinstance(callback_data, mqtt.OnConnectionSuccessData)
+    print("Connection Successful with return code: {} session present: {}".format(callback_data.return_code, callback_data.session_present))
+
+
+# Callback when a connection attempt fails
+def on_connection_failure(connection, callback_data):
+    assert isinstance(callback_data, mqtt.OnConnectionFailuredata)
+    print("Connection failed with error code: {}".format(callback_data.error))
+
+
+# Callback when a connection has been disconnected or shutdown successfully
+def on_connection_closed(connection, callback_data):
+    print("Connection closed")
+
+
+# Create the proxy options if the data is present in cmdData
+proxy_options = None
+if cmdData.input_proxy_host is not None and cmdData.input_proxy_port != 0:
+    proxy_options = http.HttpProxyOptions(
+        host_name=cmdData.input_proxy_host,
+        port=cmdData.input_proxy_port)
+
+# Create a MQTT connection from the command line data
+mqtt_connection = mqtt_connection_builder.mtls_from_path(
+    endpoint=cmdData.input_endpoint,
+    port=cmdData.input_port,
+    cert_filepath=cmdData.input_cert,
+    pri_key_filepath=cmdData.input_key,
+    ca_filepath=cmdData.input_ca,
+    on_connection_interrupted=on_connection_interrupted,
+    on_connection_resumed=on_connection_resumed,
+    client_id=cmdData.input_clientId,
+    clean_session=False,
+    keep_alive_secs=30,
+    http_proxy_options=proxy_options,
+    on_connection_success=on_connection_success,
+    on_connection_failure=on_connection_failure,
+    on_connection_closed=on_connection_closed)
+
+if not cmdData.input_is_ci:
+    print(f"Connecting to {cmdData.input_endpoint} with client ID '{cmdData.input_clientId}'...")
+else:
+    print("Connecting to endpoint with client ID")
+connect_future = mqtt_connection.connect()
+
+# Future.result() waits until a result is available
+connect_future.result()
+print("Connected!")
+
+message_count = cmdData.input_count
+message_topic = cmdData.input_topic
+message_string = cmdData.input_message
+
+# Subscribe
+print("Subscribing to topic '{}'...".format(message_topic))
+subscribe_future, packet_id = mqtt_connection.subscribe(
+    topic=message_topic,
+    qos=mqtt.QoS.AT_LEAST_ONCE,
+    callback=on_message_received)
+
+subscribe_result = subscribe_future.result()
+print("Subscribed with {}".format(str(subscribe_result['qos'])))
+
+# Publish message to server desired number of times.
+# This step is skipped if message is blank.
+# This step loops forever if count was set to 0.
+if message_string:
+    if message_count == 0:
+        print("Sending messages until program killed")
+    else:
+        print("Sending {} message(s)".format(message_count))
+
+    publish_count = 1
+    while (publish_count <= message_count) or (message_count == 0):
+        message = "{} [{}]".format(message_string, publish_count)
+        print("Publishing message to topic '{}': {}".format(message_topic, message))
+        message_json = json.dumps(message)
+        mqtt_connection.publish(
+            topic=message_topic,
+            payload=message_json,
+            qos=mqtt.QoS.AT_LEAST_ONCE)
+        time.sleep(1)
+        publish_count += 1
+
+# Wait for all messages to be received.
+# This waits forever if count was set to 0.
+if message_count != 0 and not received_all_event.is_set():
+    print("Waiting for all messages to be received...")
+
+received_all_event.wait()
+print("{} message(s) received.".format(received_count))
+
+# Disconnect
+print("Disconnecting...")
+disconnect_future = mqtt_connection.disconnect()
+disconnect_future.result()
+print("Disconnected!")
