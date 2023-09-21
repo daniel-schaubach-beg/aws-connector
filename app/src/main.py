@@ -5,8 +5,11 @@ import threading
 import time
 import json
 
+# from awscrt.mqtt5 import Client as LocalMqttClient
+
 received_count = 0
 received_all_event = threading.Event()
+
 
 # Callback when connection is accidentally lost.
 def on_connection_interrupted(connection, error, **kwargs):
@@ -61,9 +64,6 @@ def on_connection_closed(connection, callback_data):
     print("Connection closed")
 
 
-# Create the proxy options if the data is present in cmdData
-proxy_options = None
-
 # Create a MQTT connection from the command line data
 mqtt_connection = mqtt_connection_builder.mtls_from_path(
     endpoint="a1poqnhtwgj0le-ats.iot.eu-north-1.amazonaws.com",
@@ -75,10 +75,20 @@ mqtt_connection = mqtt_connection_builder.mtls_from_path(
     client_id="basicPubSub",
     clean_session=False,
     keep_alive_secs=30,
-    http_proxy_options=proxy_options,
     on_connection_success=on_connection_success,
     on_connection_failure=on_connection_failure,
     on_connection_closed=on_connection_closed)
+
+# Hier soll es dann weiter auf den LOKALEN MQTT-Broker gehen
+#local_mqtt_connection = mqtt_connection_builder.mtls_from_path(
+#    endpoint="localhost",
+#    on_connection_interrupted=on_local_connection_interrupted,
+#    on_connection_resumed=on_local_connection_resumed,
+#    clean_session=False,
+#    keep_alive_secs=30,
+#    on_connection_success=on_loccal_connection_success,
+#    on_connection_failure=on_local_connection_failure,
+#    on_connection_closed=on_local_connection_closed)
 
 connect_future = mqtt_connection.connect()
 
@@ -88,9 +98,8 @@ print("Connected!")
 
 message_count = 0
 message_topic = "sdk/test/python"
-message_string = "OWASYS Test Message"
+message_string = "OWASYS Test Message from Docker Image"
 
-# Subscribe
 print("Subscribing to topic '{}'...".format(message_topic))
 subscribe_future, packet_id = mqtt_connection.subscribe(
     topic=message_topic,
@@ -100,9 +109,6 @@ subscribe_future, packet_id = mqtt_connection.subscribe(
 subscribe_result = subscribe_future.result()
 print("Subscribed with {}".format(str(subscribe_result['qos'])))
 
-# Publish message to server desired number of times.
-# This step is skipped if message is blank.
-# This step loops forever if count was set to 0.
 if message_string:
     if message_count == 0:
         print("Sending messages until program killed")

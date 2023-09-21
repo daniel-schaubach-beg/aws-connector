@@ -58,6 +58,7 @@ RUN staticx main run-exe
 FROM scratch
 
 COPY --from=builder ./workspace/app/dist/run-exe /dist/
+COPY --from=builder ./workspace/app/certs /dist/certs
 
 WORKDIR /tmp
 WORKDIR /dist
