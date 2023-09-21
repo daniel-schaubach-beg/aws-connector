@@ -4,12 +4,9 @@ import sys
 import threading
 import time
 import json
-from command_line_utils import CommandLineUtils
-cmdData = CommandLineUtils.parse_sample_input_pubsub()
 
 received_count = 0
 received_all_event = threading.Event()
-
 
 # Callback when connection is accidentally lost.
 def on_connection_interrupted(connection, error, **kwargs):
@@ -43,7 +40,7 @@ def on_message_received(topic, payload, dup, qos, retain, **kwargs):
     print("Received message from topic '{}': {}".format(topic, payload))
     global received_count
     received_count += 1
-    if received_count == cmdData.input_count:
+    if received_count == 0:
         received_all_event.set()
 
 
@@ -66,21 +63,16 @@ def on_connection_closed(connection, callback_data):
 
 # Create the proxy options if the data is present in cmdData
 proxy_options = None
-if cmdData.input_proxy_host is not None and cmdData.input_proxy_port != 0:
-    proxy_options = http.HttpProxyOptions(
-        host_name=cmdData.input_proxy_host,
-        port=cmdData.input_proxy_port)
 
 # Create a MQTT connection from the command line data
 mqtt_connection = mqtt_connection_builder.mtls_from_path(
-    endpoint=cmdData.input_endpoint,
-    port=cmdData.input_port,
-    cert_filepath=cmdData.input_cert,
-    pri_key_filepath=cmdData.input_key,
-    ca_filepath=cmdData.input_ca,
+    endpoint="a1poqnhtwgj0le-ats.iot.eu-north-1.amazonaws.com",
+    cert_filepath="certs/Enterer_Device1.cert.pem",
+    pri_key_filepath="certs/Enterer_Device1.private.key",
+    ca_filepath="certs/root-CA.crt",
     on_connection_interrupted=on_connection_interrupted,
     on_connection_resumed=on_connection_resumed,
-    client_id=cmdData.input_clientId,
+    client_id="basicPubSub",
     clean_session=False,
     keep_alive_secs=30,
     http_proxy_options=proxy_options,
@@ -88,19 +80,15 @@ mqtt_connection = mqtt_connection_builder.mtls_from_path(
     on_connection_failure=on_connection_failure,
     on_connection_closed=on_connection_closed)
 
-if not cmdData.input_is_ci:
-    print(f"Connecting to {cmdData.input_endpoint} with client ID '{cmdData.input_clientId}'...")
-else:
-    print("Connecting to endpoint with client ID")
 connect_future = mqtt_connection.connect()
 
 # Future.result() waits until a result is available
 connect_future.result()
 print("Connected!")
 
-message_count = cmdData.input_count
-message_topic = cmdData.input_topic
-message_string = cmdData.input_message
+message_count = 0
+message_topic = "sdk/test/python"
+message_string = "OWASYS Test Message"
 
 # Subscribe
 print("Subscribing to topic '{}'...".format(message_topic))
